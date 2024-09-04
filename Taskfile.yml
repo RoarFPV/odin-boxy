@@ -1,0 +1,19 @@
+version: "3"
+
+vars:
+  NAME: boxy
+  PACKAGE: engine
+
+tasks:
+  debug:
+    aliases: [default]
+    sources:
+      - ./**/*.odin
+    generates:
+      - ./{{.NAME}}.elf
+      # - ./{{.NAME}}
+    cmds:
+      # - odin build . -out:"{{.NAME}}"
+      - odin build . -debug -out:"{{.NAME}}.elf"
+      # - nix-shell ../../shell.nix --run 'autoPatchelf {{.NAME}}.elf'
+      # - nix-shell ../../shell.nix --run 'patchelf {{.NAME}}.elf --add-needed libvulkan.so.1'
