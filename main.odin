@@ -57,17 +57,22 @@ palette := vanilia_milkshake
 width :: 720
 height :: 1024
 unit_scale :: 70.0
+inv_unit_scale :: 1.0 / unit_scale
 
-scaled_width :: width / unit_scale
-scaled_height :: height / unit_scale
+scaled_width :: width* inv_unit_scale
+scaled_height :: height * inv_unit_scale
 
 entities_dynamic := map[u32]Entity{}
-
 entities_static := map[u32]Entity{}
+
+shape_map := map[b2.ShapeId]u32{}
+shape_color_map := map[b2.ShapeId]byte{}
 
 worldDef: b2.WorldDef
 world: b2.WorldId
 nextEntityId: u32 = 1
+
+score: u64 = 0
 
 create_entity :: proc(pos: [2]f32, rot: f32, color: byte, isDynamicBody: bool) -> ^Entity {
 
@@ -89,6 +94,8 @@ create_entity :: proc(pos: [2]f32, rot: f32, color: byte, isDynamicBody: bool) -
 	body_def := b2.DefaultBodyDef()
 	body_def.position = pos
 	body_def.type = isDynamicBody ? .dynamicBody : .staticBody
+	body_def.automaticMass = true
+	// body_def.enableSleep = true
 	entity.body = b2.CreateBody(world, body_def)
 	entity.pos = pos
 	entity.rot = rot
@@ -117,8 +124,13 @@ remove_dynamic_entity :: proc(id: u32) {
 		rl.UnloadTexture(texture)
 	}
 
+	delete_key(&shape_map, e.body_shape)
+	delete_key(&shape_color_map, e.body_shape)
+
 	b2.DestroyShape(e.body_shape)
 	b2.DestroyBody(e.body)
+
+	
 
 
 }
@@ -141,7 +153,13 @@ create_box :: proc(
 	box_shape_def := b2.DefaultShapeDef()
 	box_shape_def.restitution = 1
 	entity.body_shape = b2.CreatePolygonShape(entity.body, box_shape_def, box)
-	b2.Shape_SetUserData(entity.body_shape, &entity)
+	
+	if entity.dynamicBody {
+		b2.Shape_SetUserData(entity.body_shape, &entity)
+		b2.Shape_EnableContactEvents(entity.body_shape, true)
+		shape_map[entity.body_shape] = entity.id
+		shape_color_map[entity.body_shape] = entity.color
+	}
 }
 
 create_circle :: proc(
@@ -159,20 +177,28 @@ create_circle :: proc(
 
 	circle := b2.Circle{{}, radius}
 	shape_def := b2.DefaultShapeDef()
-	shape_def.restitution = 0.5
+	shape_def.restitution = 0.1
 	shapeId := b2.CreateCircleShape(entity.body, shape_def, circle)
 	entity.body_shape = shapeId
-	b2.Shape_SetUserData(shapeId, entity)
-	b2.Shape_EnableContactEvents(shapeId, true)
+
+
+	if entity.dynamicBody {
+		b2.Shape_SetUserData(shapeId, entity)
+		b2.Shape_EnableContactEvents(shapeId, true)
+		shape_map[entity.body_shape] = entity.id
+		shape_color_map[entity.body_shape] = entity.color
+	}
 }
 
 draw_entity :: proc(e: ^Entity) {
 	c := color(e.color)
+
+
 	switch shape in e.shape {
 	case BoxShape:
 		p := e.pos + shape.size * -0.5
 		if shape.texture.id != 0 {
-			rl.DrawTextureEx(shape.texture, e.pos, rl.RAD2DEG * e.rot, 1 / unit_scale, c)
+			rl.DrawTextureEx(shape.texture, e.pos, rl.RAD2DEG * e.rot, inv_unit_scale, c)
 		} else {
 			rl.DrawRectangleV(p, shape.size, c)
 		}
@@ -181,17 +207,20 @@ draw_entity :: proc(e: ^Entity) {
 		if shape.texture.id != 0 {
 			rlgl.PushMatrix()
 			defer rlgl.PopMatrix()
+
 			rlgl.Translatef(e.pos.x, e.pos.y, 0)
 			rlgl.Rotatef(rl.RAD2DEG * e.rot, 0, 0, 1)
-
 
 			rl.DrawTextureEx(
 				shape.texture,
 				{-shape.radius, -shape.radius},
 				0,
-				(1 / unit_scale) * (shape.radius / 0.5),
+				inv_unit_scale * (shape.radius / 0.5),
 				c,
 			)
+
+			// rlgl.Scalef(inv_unit_scale, inv_unit_scale, inv_unit_scale)
+			// rl.DrawText(rl.TextFormat("%02i", e.color), 0,0,20, c)
 
 		} else {
 			rl.DrawCircleV(e.pos, shape.radius, c)
@@ -231,7 +260,7 @@ draw_entities :: proc() {
 physics_init :: proc() {
 	worldDef = b2.DefaultWorldDef()
 	worldDef.gravity = b2.Vec2{0, 10}
-
+	worldDef.contactPushoutVelocity = 100000.0
 	world = b2.CreateWorld(worldDef)
 
 	// b2.SetLengthUnitsPerMeter(unit_scale)
@@ -239,7 +268,7 @@ physics_init :: proc() {
 }
 
 physics_update :: proc(dt: f32) -> bool {
-	b2.World_Step(world, dt, 8)
+	b2.World_Step(world, dt, 16)
 
 	events := b2.World_GetContactEvents(world)
 	c := events.beginCount
@@ -247,37 +276,54 @@ physics_update :: proc(dt: f32) -> bool {
 	begins := events.beginEvents[:c]
 
 	Matching :: struct {
-		a:^Entity,
-		b:^Entity,
+		a: b2.ShapeId,
+		b: b2.ShapeId,
 	}
-	
+
 	matches := [dynamic]Matching{}
 
 	begins_loop: for event in begins {
-		eA: ^Entity = auto_cast b2.Shape_GetUserData(event.shapeIdA)
-		(eA != nil) or_continue begins_loop
+		a_color, afound := shape_color_map[event.shapeIdA]
+		b_color, bfound := shape_color_map[event.shapeIdB]
 
-		eB: ^Entity = auto_cast b2.Shape_GetUserData(event.shapeIdB)
-		(eB != nil) or_continue begins_loop
-
-		(eA.id != eB.id) or_continue begins_loop
-		(eA.color == eB.color) or_continue begins_loop
+		(afound && bfound) or_continue begins_loop
+		(a_color == b_color) or_continue begins_loop
 
 
-		append(&matches, Matching{eA, eB})
-		
+		append(&matches, Matching{event.shapeIdA, event.shapeIdB})
+
 	}
 
-	for m in matches {
-		mid := m.a.pos + (m.a.pos - m.b.pos) / 2
-		color := m.a.color
-		
+	matches_loop: for m in matches {
+		a, afound := shape_map[m.a]
+		b, bfound := shape_map[m.b]
+
+		(afound && bfound) or_continue matches_loop
+
+		ea, ea_found := entities_dynamic[a]
+		eb, eb_found := entities_dynamic[b]
+
+		(ea_found && eb_found) or_continue matches_loop
+
+
+		mid := ea.pos + (eb.pos - ea.pos) / 2
+		color := ea.color
+
+		ds := u64(ea.color)
+		score += ds * ds
 
 		// remove both
-		remove_dynamic_entity(m.a.id)
-		remove_dynamic_entity(m.b.id)
+		remove_dynamic_entity(ea.id)
+		remove_dynamic_entity(eb.id)
 
-		create_circle(mid, 0, radius_from_color(auto_cast (color+1)), color + 1, true, "assets/alienBlue.png")
+		create_circle(
+			mid,
+			0,
+			radius_from_color(auto_cast (color + 1)),
+			color + 1,
+			true,
+			"assets/alienBlue.png",
+		)
 	}
 
 	return true
@@ -287,8 +333,8 @@ color :: proc(index: byte) -> rl.Color {
 	return rl.Color(palette[index < len(palette) ? index : len(palette) - 1])
 }
 
-radius_from_color :: proc (index:int) -> f32 {
-	return auto_cast(index * index) * 0.01
+radius_from_color :: proc(index: int) -> f32 {
+	return auto_cast (index * index) * 0.01
 }
 
 leftDown := false
@@ -302,7 +348,7 @@ update_input :: proc() {
 			create_circle(
 				worldMouse,
 				0,
-				auto_cast(c * c) * 0.01,
+				auto_cast (c * c) * 0.01,
 				auto_cast c,
 				true,
 				"assets/alienYellow.png",
@@ -379,16 +425,17 @@ main :: proc() {
 				defer rl.EndMode2D()
 
 
-				rlgl.PushMatrix()
-				rlgl.Translatef(0, 25 * 1, 0)
-				rlgl.Rotatef(90, 1, 0, 0)
-				rl.DrawGrid(100, 1)
-				rlgl.PopMatrix()
+				// rlgl.PushMatrix()
+				// rlgl.Translatef(0, 25 * 1, 0)
+				// rlgl.Rotatef(90, 1, 0, 0)
+				// rl.DrawGrid(100, 1)
+				// rlgl.PopMatrix()
 
 				draw_entities()
 			}
 
 			rl.DrawFPS(rl.GetScreenWidth() - 100, 10)
+			rl.DrawText(rl.TextFormat("Score: {}", score), 100, 10, 30, color(6))
 		}
 	}
 }
