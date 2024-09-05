@@ -7,6 +7,14 @@ import rlgl "vendor:raylib/rlgl"
 import "core:fmt"
 import "core:math/rand"
 
+GameState :: enum {
+	Reset,
+	MainMenu,
+	Load,
+	Play,
+	GameOver,
+}
+
 Shape :: union {
 	CircleShape,
 	BoxShape,
@@ -60,13 +68,15 @@ unit_scale :: 70.0
 inv_unit_scale :: 1.0 / unit_scale
 drop_height :: 1.5
 
-play_area :: [2]f32 { 11, 15}
+play_area :: [2]f32{11, 15}
 
-scaled_width :: width* inv_unit_scale
+scaled_width :: width * inv_unit_scale
 scaled_height :: height * inv_unit_scale
 
-entities_dynamic := map[u32]Entity{}
-entities_static := map[u32]Entity{}
+EntityMap :: map[u32]Entity
+
+entities_dynamic := EntityMap{}
+entities_static := EntityMap{}
 
 shape_map := map[b2.ShapeId]u32{}
 shape_color_map := map[b2.ShapeId]byte{}
@@ -76,14 +86,15 @@ world: b2.WorldId
 nextEntityId: u32 = 1
 
 score: u64 = 0
-drop_entity:^Entity
+drop_entity: ^Entity
 leftDown := false
-last_drop_time :f64
+last_drop_time: f64
 drop_wait :: 1.0
 
-gravity :: [2]f32{0, 12}
-restitution :: 0.1
+gravity :: [2]f32{0, 30}
+restitution :: 0
 
+game_state: GameState = .MainMenu
 
 create_entity :: proc(pos: [2]f32, rot: f32, color: byte, isDynamicBody: bool) -> ^Entity {
 
@@ -116,13 +127,16 @@ create_entity :: proc(pos: [2]f32, rot: f32, color: byte, isDynamicBody: bool) -
 	return entity
 }
 
-remove_dynamic_entity :: proc(id: u32) {
-	e, ok := entities_dynamic[id]
-	if !ok {
-		return
-	}
+remove_entity_from_map :: proc(entities: ^EntityMap, id: u32) {
+	e, found := entities[id]
+	if !found {return}
 
-	delete_key(&entities_dynamic, id)
+	remove_entity(&e)
+
+	delete_key(entities, id)
+}
+
+remove_entity :: proc(e: ^Entity) {
 	texture: rl.Texture
 	switch shape in e.shape {
 	case BoxShape:
@@ -140,10 +154,6 @@ remove_dynamic_entity :: proc(id: u32) {
 
 	b2.DestroyShape(e.body_shape)
 	b2.DestroyBody(e.body)
-
-	
-
-
 }
 
 create_box :: proc(
@@ -164,9 +174,8 @@ create_box :: proc(
 	box_shape_def := b2.DefaultShapeDef()
 	// box_shape_def.restitution = restitution
 	entity.body_shape = b2.CreatePolygonShape(entity.body, box_shape_def, box)
-	
+
 	if entity.dynamicBody {
-		b2.Shape_SetUserData(entity.body_shape, &entity)
 		b2.Shape_EnableContactEvents(entity.body_shape, true)
 		shape_map[entity.body_shape] = entity.id
 		shape_color_map[entity.body_shape] = entity.color
@@ -188,13 +197,12 @@ create_circle :: proc(
 
 	circle := b2.Circle{{}, radius}
 	shape_def := b2.DefaultShapeDef()
-	shape_def.restitution = restitution
+	// shape_def.restitution = restitution
 	shapeId := b2.CreateCircleShape(entity.body, shape_def, circle)
 	entity.body_shape = shapeId
 
 
 	if entity.dynamicBody {
-		b2.Shape_SetUserData(shapeId, entity)
 		b2.Shape_EnableContactEvents(shapeId, true)
 		shape_map[entity.body_shape] = entity.id
 		shape_color_map[entity.body_shape] = entity.color
@@ -280,6 +288,15 @@ physics_init :: proc() {
 
 }
 
+physics_shudown :: proc() {
+	if !b2.World_IsValid(world) {
+		return
+	}
+
+	b2.DestroyWorld(world)
+	world = {}
+}
+
 physics_update :: proc(dt: f32) -> bool {
 	b2.World_Step(world, dt, 16)
 
@@ -326,8 +343,8 @@ physics_update :: proc(dt: f32) -> bool {
 		score += ds * ds
 
 		// remove both
-		remove_dynamic_entity(ea.id)
-		remove_dynamic_entity(eb.id)
+		remove_entity_from_map(&entities_dynamic, ea.id)
+		remove_entity_from_map(&entities_dynamic, eb.id)
 
 		create_circle(
 			mid,
@@ -351,26 +368,32 @@ radius_from_color :: proc(index: int) -> f32 {
 }
 
 
-update_input :: proc() {
+game_update_input :: proc() {
+	if !rl.IsCursorHidden() {
+		rl.HideCursor()
+		rl.DisableCursor()
+	}
+
 	mousePos := rl.GetMousePosition()
 	worldMouse := rl.GetScreenToWorld2D(mousePos, camera)
-	drop_pos :=  [2]f32{worldMouse.x, drop_height}
+	x := clamp(worldMouse.x, -play_area.x/2 + 0.7, play_area.x/2 -0.7)
+	drop_pos := [2]f32{x, drop_height}
 	t := rl.GetTime()
 
 	if drop_entity != nil {
 		drop_entity.pos = drop_pos
 		b2.Body_SetTransform(drop_entity.body, drop_pos, b2.Rot_identity)
-		
+
 	} else if (last_drop_time + drop_wait) < t {
 		c := 1 + rand.int_max(len(palette) - 2)
 		drop_entity = create_circle(
 			drop_pos,
-				0,
-				auto_cast (c * c) * 0.01 + 0.2,
-				auto_cast c,
-				true,
-				"assets/alienYellow.png",
-			)
+			0,
+			auto_cast (c * c) * 0.01 + 0.2,
+			auto_cast c,
+			true,
+			"assets/alienYellow.png",
+		)
 
 		b2.Body_Disable(drop_entity.body)
 		b2.Shape_EnableContactEvents(drop_entity.body_shape, false)
@@ -379,7 +402,7 @@ update_input :: proc() {
 
 	if rl.IsMouseButtonDown(.LEFT) {
 		if !leftDown {
-			
+
 			if drop_entity != nil {
 				b2.Body_SetTransform(drop_entity.body, drop_entity.pos, b2.Rot_identity)
 				b2.Body_Enable(drop_entity.body)
@@ -402,7 +425,7 @@ update_input :: proc() {
 	wheel := rl.GetMouseWheelMove()
 	if wheel != 0 {
 		zoomIncrement :: 1
-		
+
 		camera.offset = mousePos
 		camera.target = worldMouse
 		camera.zoom += rl.GetMouseWheelMove() * zoomIncrement
@@ -417,24 +440,115 @@ camera := rl.Camera2D {
 	zoom   = unit_scale,
 }
 
-main :: proc() {
+game_update_state :: proc(dt: f32) {
+	switch game_state {
+	case .MainMenu:
+		game_render()
+		menu_update()
 
-	rl.InitWindow(width, height, "boxy")
-	defer rl.CloseWindow()
+	case .Reset:
+		for id, &entity in entities_dynamic {
+			remove_entity(&entity)
+		}
+
+		for id, &entity in entities_static {
+			remove_entity(&entity)
+		}
+
+		drop_entity = nil
+		
+		clear_map(&entities_dynamic)
+		clear_map(&entities_static)
+
+		physics_shudown()
+
+		game_state = .Load
+
+	case .Load:
+		physics_init()
+		game_init()
+		game_state = .Play
+
+	case .Play:
+		physics_update(dt)
+		game_update_input()
+		game_render()
+		game_render_score()
+
+		if rl.IsKeyDown(rl.KeyboardKey.ENTER) {
+			game_state = .GameOver
+		}
+
+	case .GameOver:
+		if rl.IsCursorHidden() {
+			rl.ShowCursor()
+			rl.EnableCursor()
+		}
+
+		game_render()
+		game_render_score()
+		{
+			size := rl.MeasureText("GAME OVER", 40)
+			// rl.GuiButton({rl.GetScreenWidth() / 2, rl.GetScreenWidth() / 2, 100, 100}, "GAME OVER")
+			rl.DrawText(
+				"GAME OVER",
+				rl.GetScreenWidth() / 2 - size / 2,
+				rl.GetScreenHeight() / 2 - 20,
+				40,
+				color(3),
+			)
+		}
 
 
-	physics_init()
+		if rl.IsKeyReleased(rl.KeyboardKey.SPACE) {
+			game_state = .MainMenu
+		}
 
+	}
+}
+
+menu_update :: proc() {
+	// rl.DrawText("Play", rl.GetScreenWidth() / 2, rl.GetScreenHeight() / 2, 30, color(12))
+
+	if rl.GuiButton({width / 2 - 50, height / 2 - 25, 100, 50}, "PLAY") ||
+	   rl.IsKeyDown(rl.KeyboardKey.SPACE) {
+		game_state = .Reset
+	}
+}
+
+game_render :: proc() {
+	rl.BeginMode2D(camera)
+	defer rl.EndMode2D()
+
+	if drop_entity != nil {
+		rl.DrawLineEx(drop_entity.pos, drop_entity.pos + {0, 40}, 0.1, color(15))
+	}
+	draw_entities()
+
+}
+
+game_render_score :: proc(){
+	rl.DrawText(rl.TextFormat("Score: {}", score), 100, 10, 30, color(0))
+	rl.DrawLineEx({-play_area.x,1}, {play_area.x, 1}, 0.2, color(15))
+}
+
+game_init :: proc() {
 	// floor
 	create_box({0, play_area.y}, 0, {50, 1}, 11, false) //, "assets/grass.png")
 
 	// walls
-	create_box({play_area.x/2, 4}, 0, {1, 50}, 11, false) //, "assets/grass.png")
-	create_box({-play_area.x/2, 4}, 0, {1, 50}, 11, false) //, "assets/grass.png")
+	create_box({play_area.x / 2, 4}, 0, {1, 50}, 11, false) //, "assets/grass.png")
+	create_box({-play_area.x / 2, 4}, 0, {1, 50}, 11, false) //, "assets/grass.png")
 
-	create_circle({0, 0}, 0, 0.5, 3, true, "assets/alienBeige.png")
-	create_box({0, 0}, 0, {1.0, 1.0}, 4, true, "assets/grass.png")
+	// create_circle({0, 0}, 0, 0.5, 3, true, "assets/alienBeige.png")
+	// create_box({0, 0}, 0, {1.0, 1.0}, 4, true, "assets/grass.png")
 
+}
+
+main :: proc() {
+
+	rl.InitWindow(width, height, "boxy")
+	defer rl.CloseWindow()
 
 	rl.SetTargetFPS(165)
 
@@ -442,34 +556,15 @@ main :: proc() {
 	for !rl.WindowShouldClose() {
 		dt := rl.GetFrameTime()
 
-		if !pause {
-			physics_update(dt)
-		}
+		rl.BeginDrawing()
+		defer rl.EndDrawing()
 
-		update_input()
+		rl.ClearBackground(color(6))
 
-		{
-			rl.BeginDrawing()
-			defer rl.EndDrawing()
+		game_update_state(dt)
 
-			rl.ClearBackground(color(6))
-
-			{
-				rl.BeginMode2D(camera)
-				defer rl.EndMode2D()
+		rl.DrawFPS(rl.GetScreenWidth() - 100, 10)
 
 
-				// rlgl.PushMatrix()
-				// rlgl.Translatef(0, 25 * 1, 0)
-				// rlgl.Rotatef(90, 1, 0, 0)
-				// rl.DrawGrid(100, 1)
-				// rlgl.PopMatrix()
-
-				draw_entities()
-			}
-
-			rl.DrawFPS(rl.GetScreenWidth() - 100, 10)
-			rl.DrawText(rl.TextFormat("Score: {}", score), 100, 10, 30, color(0))
-		}
 	}
 }
