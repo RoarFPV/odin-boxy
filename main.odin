@@ -35,22 +35,22 @@ Entity :: struct {
 }
 
 vanilia_milkshake :: [?][4]byte {
-	{0x28, 0x28, 0x2e, 255},
-	{0x6c, 0x56, 0x71, 255},
-	{0xd9, 0xc8, 0xbf, 255},
-	{0xf9, 0x82, 0x84, 255},
-	{0xb0, 0xa9, 0xe4, 255},
-	{0xac, 0xcc, 0xe4, 255},
-	{0xb3, 0xe3, 0xda, 255},
-	{0xfe, 0xaa, 0xe4, 255},
-	{0x87, 0xa8, 0x89, 255},
-	{0xb0, 0xeb, 0x93, 255},
-	{0xe9, 0xf5, 0x9d, 255},
-	{0xff, 0xe6, 0xc6, 255},
-	{0xde, 0xa3, 0x8b, 255},
-	{0xff, 0xc3, 0x84, 255},
-	{0xff, 0xf7, 0xa0, 255},
-	{0xff, 0xf7, 0xe4, 255},
+	{0x28, 0x28, 0x2e, 255}, // 0
+	{0x6c, 0x56, 0x71, 255}, // 1
+	{0xd9, 0xc8, 0xbf, 255}, // 2
+	{0xf9, 0x82, 0x84, 255}, // 3
+	{0xb0, 0xa9, 0xe4, 255}, // 4
+	{0xac, 0xcc, 0xe4, 255}, // 5
+	{0xb3, 0xe3, 0xda, 255}, // 6
+	{0xfe, 0xaa, 0xe4, 255}, // 7
+	{0x87, 0xa8, 0x89, 255}, // 8
+	{0xb0, 0xeb, 0x93, 255}, // 9
+	{0xe9, 0xf5, 0x9d, 255}, // 10
+	{0xff, 0xe6, 0xc6, 255}, // 11
+	{0xde, 0xa3, 0x8b, 255}, // 12
+	{0xff, 0xc3, 0x84, 255}, // 13
+	{0xff, 0xf7, 0xa0, 255}, // 14
+	{0xff, 0xf7, 0xe4, 255}, // 15
 }
 
 palette := vanilia_milkshake
@@ -58,6 +58,9 @@ width :: 720
 height :: 1024
 unit_scale :: 70.0
 inv_unit_scale :: 1.0 / unit_scale
+drop_height :: 1.5
+
+play_area :: [2]f32 { 11, 15}
 
 scaled_width :: width* inv_unit_scale
 scaled_height :: height * inv_unit_scale
@@ -73,6 +76,14 @@ world: b2.WorldId
 nextEntityId: u32 = 1
 
 score: u64 = 0
+drop_entity:^Entity
+leftDown := false
+last_drop_time :f64
+drop_wait :: 1.0
+
+gravity :: [2]f32{0, 12}
+restitution :: 0.1
+
 
 create_entity :: proc(pos: [2]f32, rot: f32, color: byte, isDynamicBody: bool) -> ^Entity {
 
@@ -151,7 +162,7 @@ create_box :: proc(
 	box := b2.MakeBox(size.x / 2, size.y / 2)
 
 	box_shape_def := b2.DefaultShapeDef()
-	box_shape_def.restitution = 1
+	// box_shape_def.restitution = restitution
 	entity.body_shape = b2.CreatePolygonShape(entity.body, box_shape_def, box)
 	
 	if entity.dynamicBody {
@@ -169,7 +180,7 @@ create_circle :: proc(
 	color: byte,
 	isDynamicBody: bool,
 	texturePath: cstring = nil,
-) {
+) -> ^Entity {
 	entity := create_entity(pos, rot, color, isDynamicBody)
 	texture := rl.LoadTexture(texturePath)
 
@@ -177,7 +188,7 @@ create_circle :: proc(
 
 	circle := b2.Circle{{}, radius}
 	shape_def := b2.DefaultShapeDef()
-	shape_def.restitution = 0.1
+	shape_def.restitution = restitution
 	shapeId := b2.CreateCircleShape(entity.body, shape_def, circle)
 	entity.body_shape = shapeId
 
@@ -188,6 +199,8 @@ create_circle :: proc(
 		shape_map[entity.body_shape] = entity.id
 		shape_color_map[entity.body_shape] = entity.color
 	}
+
+	return entity
 }
 
 draw_entity :: proc(e: ^Entity) {
@@ -259,8 +272,8 @@ draw_entities :: proc() {
 
 physics_init :: proc() {
 	worldDef = b2.DefaultWorldDef()
-	worldDef.gravity = b2.Vec2{0, 10}
-	worldDef.contactPushoutVelocity = 100000.0
+	worldDef.gravity = gravity
+	// worldDef.contactPushoutVelocity = 100000.0
 	world = b2.CreateWorld(worldDef)
 
 	// b2.SetLengthUnitsPerMeter(unit_scale)
@@ -337,22 +350,43 @@ radius_from_color :: proc(index: int) -> f32 {
 	return auto_cast (index * index) * 0.01
 }
 
-leftDown := false
-update_input :: proc() {
 
-	if rl.IsMouseButtonDown(.LEFT) {
-		if !leftDown {
-			mousePos := rl.GetMousePosition()
-			worldMouse := rl.GetScreenToWorld2D(mousePos, camera)
-			c := 1 + rand.int_max(len(palette) - 2)
-			create_circle(
-				worldMouse,
+update_input :: proc() {
+	mousePos := rl.GetMousePosition()
+	worldMouse := rl.GetScreenToWorld2D(mousePos, camera)
+	drop_pos :=  [2]f32{worldMouse.x, drop_height}
+	t := rl.GetTime()
+
+	if drop_entity != nil {
+		drop_entity.pos = drop_pos
+		b2.Body_SetTransform(drop_entity.body, drop_pos, b2.Rot_identity)
+		
+	} else if (last_drop_time + drop_wait) < t {
+		c := 1 + rand.int_max(len(palette) - 2)
+		drop_entity = create_circle(
+			drop_pos,
 				0,
-				auto_cast (c * c) * 0.01,
+				auto_cast (c * c) * 0.01 + 0.2,
 				auto_cast c,
 				true,
 				"assets/alienYellow.png",
 			)
+
+		b2.Body_Disable(drop_entity.body)
+		b2.Shape_EnableContactEvents(drop_entity.body_shape, false)
+
+	}
+
+	if rl.IsMouseButtonDown(.LEFT) {
+		if !leftDown {
+			
+			if drop_entity != nil {
+				b2.Body_SetTransform(drop_entity.body, drop_entity.pos, b2.Rot_identity)
+				b2.Body_Enable(drop_entity.body)
+				b2.Shape_EnableContactEvents(drop_entity.body_shape, true)
+				last_drop_time = t
+				drop_entity = nil
+			}
 			leftDown = true
 		}
 	} else {
@@ -368,9 +402,9 @@ update_input :: proc() {
 	wheel := rl.GetMouseWheelMove()
 	if wheel != 0 {
 		zoomIncrement :: 1
-		mousePos := rl.GetMousePosition()
+		
 		camera.offset = mousePos
-		camera.target = rl.GetScreenToWorld2D(mousePos, camera)
+		camera.target = worldMouse
 		camera.zoom += rl.GetMouseWheelMove() * zoomIncrement
 		if camera.zoom < zoomIncrement {
 			camera.zoom = zoomIncrement
@@ -392,11 +426,11 @@ main :: proc() {
 	physics_init()
 
 	// floor
-	create_box({0, 15}, 0, {50, 1}, 9, false) //, "assets/grass.png")
+	create_box({0, play_area.y}, 0, {50, 1}, 11, false) //, "assets/grass.png")
 
 	// walls
-	create_box({5.5, 4}, 0, {1, 50}, 10, false) //, "assets/grass.png")
-	create_box({-5.5, 4}, 0, {1, 50}, 11, false) //, "assets/grass.png")
+	create_box({play_area.x/2, 4}, 0, {1, 50}, 11, false) //, "assets/grass.png")
+	create_box({-play_area.x/2, 4}, 0, {1, 50}, 11, false) //, "assets/grass.png")
 
 	create_circle({0, 0}, 0, 0.5, 3, true, "assets/alienBeige.png")
 	create_box({0, 0}, 0, {1.0, 1.0}, 4, true, "assets/grass.png")
@@ -418,7 +452,7 @@ main :: proc() {
 			rl.BeginDrawing()
 			defer rl.EndDrawing()
 
-			rl.ClearBackground(color(0))
+			rl.ClearBackground(color(6))
 
 			{
 				rl.BeginMode2D(camera)
@@ -435,7 +469,7 @@ main :: proc() {
 			}
 
 			rl.DrawFPS(rl.GetScreenWidth() - 100, 10)
-			rl.DrawText(rl.TextFormat("Score: {}", score), 100, 10, 30, color(6))
+			rl.DrawText(rl.TextFormat("Score: {}", score), 100, 10, 30, color(0))
 		}
 	}
 }
