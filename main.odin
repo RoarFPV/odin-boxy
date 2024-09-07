@@ -41,6 +41,7 @@ Entity :: struct {
 	pos:         [2]f32,
 	rot:         f32,
 	dynamicBody: bool,
+	alpha:       byte,
 }
 
 vanilia_milkshake :: [?][4]byte {
@@ -63,16 +64,23 @@ vanilia_milkshake :: [?][4]byte {
 }
 
 Object :: struct {
+	id:           u32,
 	name:         string,
 	texture:      string,
 	textureScale: f32,
 	radius:       f32,
-	type:         byte,
 	score:        u32,
 }
 
 
-// objectTable := [?]Object{{"", "fruit"}}
+objectTable := [?]Object {
+	{0, "0", "assets/alienBeige.png", 1.0, 0.2, 10},
+	{1, "1", "assets/alienBlue.png", 1.0, 0.4, 20},
+	{2, "2", "assets/alienGreen.png", 1.0, 0.6, 40},
+	{3, "3", "assets/alienPink.png", 1.0, 0.8, 80},
+	{4, "4", "assets/alienYellow.png", 1.0, 1, 160},
+}
+
 
 // Game
 score: u64 = 0
@@ -117,13 +125,15 @@ leftDown := false
 
 // Drop
 drop_wait :: 0.5
-drop_height :: 1.5
+drop_height :: 2.0
+drop_max_index :: 2
 drop_entity: ^Entity
 last_drop_time: f64
 
+
 // Physics
 gravity :: [2]f32{0, 30}
-restitution :: 0
+restitution :: 0.1
 worldDef: b2.WorldDef
 world: b2.WorldId
 
@@ -134,12 +144,19 @@ texture_load :: proc(path: string) -> rl.Texture {
 	}
 
 	t = rl.LoadTexture(strings.clone_to_cstring(path))
+	rl.SetTextureFilter(t, .TRILINEAR)
 	textures[path] = t
 	return t
 
 }
 
-create_entity :: proc(pos: [2]f32, rot: f32, color: byte, isDynamicBody: bool) -> ^Entity {
+create_entity :: proc(
+	pos: [2]f32,
+	rot: f32,
+	color: byte,
+	isDynamicBody: bool,
+	alpha: byte = 255,
+) -> ^Entity {
 
 	id := nextEntityId
 
@@ -166,6 +183,7 @@ create_entity :: proc(pos: [2]f32, rot: f32, color: byte, isDynamicBody: bool) -
 	entity.rot = rot
 	entity.dynamicBody = isDynamicBody
 	entity.color = color
+	entity.alpha = alpha
 
 	return entity
 }
@@ -201,10 +219,11 @@ create_box :: proc(
 	size: [2]f32,
 	color: byte,
 	isDynamicBody: bool,
+	alpha: byte = 255,
 	texturePath: string = "",
 	isSensor: bool = false,
 ) -> ^Entity {
-	entity := create_entity(pos, rot, color, isDynamicBody)
+	entity := create_entity(pos, rot, color, isDynamicBody, alpha = alpha)
 	texture := texture_load(texturePath)
 
 	entity.shape = BoxShape{size, texture}
@@ -232,16 +251,17 @@ create_circle :: proc(
 	radius: f32,
 	color: byte,
 	isDynamicBody: bool,
+	alpha: byte = 255,
 	texturePath: string = "",
 ) -> ^Entity {
-	entity := create_entity(pos, rot, color, isDynamicBody)
+	entity := create_entity(pos, rot, color, isDynamicBody, alpha)
 	texture := texture_load(texturePath)
 
 	entity.shape = CircleShape{radius, texture}
 
 	circle := b2.Circle{{}, radius}
 	shape_def := b2.DefaultShapeDef()
-	// shape_def.restitution = restitution
+	shape_def.restitution = restitution
 	shapeId := b2.CreateCircleShape(entity.body, shape_def, circle)
 	entity.body_shape = shapeId
 
@@ -257,7 +277,7 @@ create_circle :: proc(
 
 draw_entity :: proc(e: ^Entity) {
 	c := color(e.color)
-
+	c[3] = e.alpha
 
 	switch shape in e.shape {
 	case BoxShape:
@@ -276,12 +296,13 @@ draw_entity :: proc(e: ^Entity) {
 			rlgl.Translatef(e.pos.x, e.pos.y, 0)
 			rlgl.Rotatef(rl.RAD2DEG * e.rot, 0, 0, 1)
 
+			
 			rl.DrawTextureEx(
 				shape.texture,
 				{-shape.radius, -shape.radius},
 				0,
 				inv_unit_scale * (shape.radius / 0.5),
-				c,
+				rl.WHITE,
 			)
 
 			// rlgl.Scalef(inv_unit_scale, inv_unit_scale, inv_unit_scale)
@@ -294,9 +315,7 @@ draw_entity :: proc(e: ^Entity) {
 }
 
 draw_entities :: proc() {
-	for id, &e in entities_static {
-		draw_entity(&e)
-	}
+
 
 	for id, &e in entities_dynamic {
 		t := b2.Body_GetTransform(e.body)
@@ -318,6 +337,10 @@ draw_entities :: proc() {
 		// fmt.printfln("pos: {}", bodyPos)
 		e.pos = w
 		e.rot = b2.Rot_GetAngle(t.q)
+		draw_entity(&e)
+	}
+
+	for id, &e in entities_static {
 		draw_entity(&e)
 	}
 }
@@ -342,7 +365,7 @@ physics_shudown :: proc() {
 }
 
 physics_update :: proc(dt: f32) -> bool {
-	b2.World_Step(world, dt, 16)
+	b2.World_Step(world, dt, 8)
 
 	{
 		sensor_events := b2.World_GetSensorEvents(world)
@@ -350,7 +373,10 @@ physics_update :: proc(dt: f32) -> bool {
 		{
 			count := sensor_events.beginCount
 			events := sensor_events.beginEvents[:count]
-			for event in events {
+			begin_loop: for event in events {
+				if drop_entity != nil {
+					(event.visitorShapeId == drop_entity.body_shape) or_continue begin_loop
+				}
 				switch event.sensorShapeId {
 				case top_sensor.body_shape:
 					shapes_on_top[event.visitorShapeId] = 1
@@ -363,7 +389,10 @@ physics_update :: proc(dt: f32) -> bool {
 		{
 			count := sensor_events.endCount
 			events := sensor_events.endEvents[:count]
-			for event in events {
+			end_loop: for event in events {
+				if drop_entity != nil {
+					(event.visitorShapeId == drop_entity.body_shape) or_continue end_loop
+				}
 				switch event.sensorShapeId {
 				case top_sensor.body_shape:
 					delete_key(&shapes_on_top, event.visitorShapeId)
@@ -411,23 +440,22 @@ physics_update :: proc(dt: f32) -> bool {
 
 
 		mid := ea.pos + (eb.pos - ea.pos) / 2
-		color := ea.color
 
-		ds := u64(ea.color)
-		score += ds * ds
+
+		data := objectTable[ea.color]
+
+		score += auto_cast data.score
 
 		// remove both
 		remove_entity_from_map(&entities_dynamic, ea.id)
 		remove_entity_from_map(&entities_dynamic, eb.id)
 
-		create_circle(
-			mid,
-			0,
-			radius_from_color(auto_cast (color + 1)),
-			color + 1,
-			true,
-			"assets/alienYellow.png",
-		)
+		next := data.id + 1
+
+		if next < len(objectTable) {
+			data = objectTable[next]
+			create_circle(mid, 0, data.radius, auto_cast next, true, 255, data.texture)
+		}
 	}
 
 	return true
@@ -445,7 +473,7 @@ radius_from_color :: proc(index: int) -> f32 {
 game_update_input :: proc() {
 	if !rl.IsCursorHidden() {
 		rl.HideCursor()
-		rl.DisableCursor()
+		// rl.DisableCursor()
 	}
 
 	mousePos := rl.GetMousePosition()
@@ -459,14 +487,19 @@ game_update_input :: proc() {
 		b2.Body_SetTransform(drop_entity.body, drop_pos, b2.Rot_identity)
 
 	} else if (last_drop_time + drop_wait) < t {
-		c := 1 + rand.int_max(len(palette) - 2)
+		assert( drop_max_index < len(objectTable))
+		c := rand.int_max(drop_max_index+1)
+
+		data := objectTable[c]
+
 		drop_entity = create_circle(
 			drop_pos,
 			0,
-			auto_cast (c * c) * 0.01 + 0.2,
-			auto_cast c,
+			data.radius,
+			u8(data.id),
 			true,
-			"assets/alienYellow.png",
+			255,
+			data.texture,
 		)
 
 		b2.Body_Disable(drop_entity.body)
@@ -534,9 +567,12 @@ game_update_state :: proc(dt: f32) {
 		clear_map(&entities_dynamic)
 		clear_map(&entities_static)
 
-		for id, &texture in textures {
-			rl.UnloadTexture(texture)
-		}
+		clear_map(&shapes_on_top)
+		clear_map(&shapes_over_top)
+
+		// for id, &texture in textures {
+		// 	rl.UnloadTexture(texture)
+		// }
 
 		physics_shudown()
 
@@ -576,11 +612,11 @@ game_update_state :: proc(dt: f32) {
 				40,
 				color(3),
 			)
-		}
 
-
-		if rl.IsKeyReleased(rl.KeyboardKey.SPACE) {
-			game_state = .MainMenu
+			if rl.GuiButton({width / 2 - 50, height / 2, 100, 50}, "Restart") ||
+			   rl.IsKeyDown(rl.KeyboardKey.SPACE) {
+				game_state = .MainMenu
+			}
 		}
 
 	}
@@ -619,8 +655,16 @@ game_init :: proc() {
 	create_box({play_area.x / 2, 4}, 0, {1, 50}, 11, false) //, "assets/grass.png")
 	create_box({-play_area.x / 2, 4}, 0, {1, 50}, 11, false) //, "assets/grass.png")
 
-	over_sensor = create_box({0, 0}, 0, {play_area.x, 2.0}, 5, false, isSensor = true)
-	top_sensor = create_box({0, 1}, 0, {play_area.x, 1.0}, 4, false, isSensor = true)
+	over_sensor = create_box({0, 1}, 0, {play_area.x, 3}, 5, false, isSensor = true, alpha = 127)
+	top_sensor = create_box(
+		{0, 2.5},
+		0,
+		{play_area.x, 1.0},
+		4,
+		false,
+		isSensor = true,
+		alpha = 127,
+	)
 }
 
 
@@ -628,7 +672,6 @@ game_check_end :: proc() {
 	if len(shapes_over_top) < 1 {
 		return
 	}
-
 
 	for shape, i in shapes_over_top {
 		if !(shape in shapes_on_top) {
